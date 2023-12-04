@@ -1,0 +1,12 @@
+#pragma once
+#include "Units.hpp"
+// -------------------------------------------------------------------------------------
+#include "gflags/gflags.h"
+// -------------------------------------------------------------------------------------
+DECLARE_double (x_dram_gib);
+DECLARE_string (x_idx);
+DECLARE_string (y_kvs);
+DECLARE_uint32 (public_list_len);
+DECLARE_uint32 (start_level);
+DECLARE_string (bg_threads_enabled_idx);
+DECLARE_string (dbname);
