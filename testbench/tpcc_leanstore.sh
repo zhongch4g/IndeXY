@@ -39,7 +39,7 @@ tpcc_leanstore() {
 }
 
 tpcc_leanstore2() {
-    for i in 4 8 16; do
+    for i in 2 4 8 16; do
         rm ssd_file
         touch ssd_file
         rm *.csv
