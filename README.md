@@ -6,7 +6,7 @@ This guide outlines the steps to compile and execute experiments for the IndeXY 
 ## Compiling
 Install dependencies:
 
-`sudo apt-get install cmake libaio-dev libtbb-dev librocksdb-dev`
+`sudo apt-get install gcc g++ make cmake libaio-dev libz-dev numactl dstat`
 
 `cd testbench`
 
@@ -23,6 +23,9 @@ To run the experiments, execute the following command under testbench folder:
 
 ### B+-B+
 `sudo bash benchmark_LeanStore.sh`
+
+### RocksDB
+`sudo bash benchmark_rocksdb.sh`
 
 ```
 Note: Please be aware that each of these scripts might take several weeks to complete depending on the speed of the SSD.

@@ -43,9 +43,9 @@ tpcc_leanstore2() {
             --contention_split \
             --xmerge \
             --print_tx_console \
-            --run_until_tx=60000000 >../results/tpcc/data/tpcc_leanstore_30GB_8_thrd_${page_size}KB_page_2TX.data
+            --run_until_tx=60000000 >../results/tpcc/data/tpcc_leanstore_30GB_8_thrd_${page_size}KB_page_2TX_pg.data
 
-        mv log.log ../results/tpcc/data/tpcc_leanstore_30GB_8_thrd_${page_size}KB_page_2TX.log
+        mv log.log ../results/tpcc/data/tpcc_leanstore_30GB_8_thrd_${page_size}KB_page_2TX_pg.log
 
         sync
         sysctl -q -w vm.drop_caches=3

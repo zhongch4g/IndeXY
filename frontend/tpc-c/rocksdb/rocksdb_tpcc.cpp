@@ -7,8 +7,9 @@
 #include "leanstore/utils/RandomGenerator.hpp"
 #include "leanstore/utils/ZipfGenerator.hpp"
 // -------------------------------------------------------------------------------------
-#include "../../shared/artlsm_tpcc_schema.hpp"
-#include "xystore_tpcc_adapter.hpp"
+#include <rocksdb/db.h>
+#include "rocksdb_tpcc_adapter.hpp"
+#include "rocksdb_tpcc_schema.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
 
@@ -31,66 +32,50 @@ DEFINE_bool (tpcc_cross_warehouses, true, "");
 DEFINE_bool (tpcc_remove, true, "");
 DEFINE_uint64 (run_until_tx, 0, "");
 
+#define PATH "ssd_file_rocksdb"
+
 // -------------------------------------------------------------------------------------
 // warehouse, district, customer, customerwdl, history, neworder, order, order_wdc, orderline, item,
 // stock
 
-std::vector<std::string> idxes{"warehouse", "district", "customer", "customerwdl",
-                               "history",   "neworder", "order",    "order_wdc",
-                               "orderline", "item",     "stock"};
-
-StructureXY<warehouse_t> warehouse;
-StructureXY<district_t> district;
-StructureXY<customer_t> customer;
-StructureXY<customer_wdl_t> customerwdl;
-StructureXY<history_t> history;
-StructureXY<neworder_t> neworder;
-StructureXY<order_t> order;
-StructureXY<order_wdc_t> order_wdc;
-StructureXY<orderline_t> orderline;
-StructureXY<item_t> item;
-StructureXY<stock_t> stock;
-#include "../../shared/artlsm_tpcc_workload.hpp"
+RocksDBAdapter<warehouse_t> warehouse;
+RocksDBAdapter<district_t> district;
+RocksDBAdapter<customer_t> customer;
+RocksDBAdapter<customer_wdl_t> customerwdl;
+RocksDBAdapter<history_t> history;
+RocksDBAdapter<neworder_t> neworder;
+RocksDBAdapter<order_t> order;
+RocksDBAdapter<order_wdc_t> order_wdc;
+RocksDBAdapter<orderline_t> orderline;
+RocksDBAdapter<item_t> item;
+RocksDBAdapter<stock_t> stock;
+#include "rocksdb_tpcc_workload.hpp"
 
 // -------------------------------------------------------------------------------------
 int main (int argc, char** argv) {
     gflags::SetUsageMessage ("ExdIndex TPC-C");
     gflags::ParseCommandLineFlags (&argc, &argv, true);
-    INFO ("ExdIndex TPC-C");
-    DEBUG ("ExdIndex TPC-C");
+
     chrono::high_resolution_clock::time_point begin, end;
-    warehouseCount = FLAGS_tpcc_warehouse_count;
     // -------------------------------------------------------------------------------------
-    std::shared_ptr<XYStore> xystore = std::make_shared<XYStore> ();
 
-    warehouse = StructureXY<warehouse_t> ("warehouse", xystore);
-    district = StructureXY<district_t> ("district", xystore);
-    customer = StructureXY<customer_t> ("customer", xystore);
-    customerwdl = StructureXY<customer_wdl_t> ("customerwdl", xystore);
-    history = StructureXY<history_t> ("history", xystore);
-    neworder = StructureXY<neworder_t> ("neworder", xystore);
-    order = StructureXY<order_t> ("order", xystore);
-    order_wdc = StructureXY<order_wdc_t> ("order_wdc", xystore);
-    orderline = StructureXY<orderline_t> ("orderline", xystore);
-    item = StructureXY<item_t> ("item", xystore);
-    stock = StructureXY<stock_t> ("stock", xystore);
-
-    xystore->backgroundThreadsManager ();
-    xystore->artkvsMonitor ();
-    xystore->artkvsStatistics ();
+    warehouse.InitializeDB();
+    district.InitializeDB();
+    customer.InitializeDB();
+    customerwdl.InitializeDB();
+    history.InitializeDB();
+    neworder.InitializeDB();
+    order.InitializeDB();
+    order_wdc.InitializeDB();
+    orderline.InitializeDB();
+    item.InitializeDB();
+    stock.InitializeDB();
 
     std::vector<thread> threads;
     std::atomic<u32> g_w_id (1);
-    INFO ("WH %u WT %u\n", warehouseCount, FLAGS_worker_threads);
-    INFO (
-        "warehouse %lu, district %lu b customer %lu customerwdl %lu history %lu neworder %lu order "
-        "%lu order_wdc %lu orderline %lu "
-        "item %lu stock %lu\n",
-        sizeof (warehouse_t), sizeof (district_t), sizeof (customer_t), sizeof (customer_wdl_t),
-        sizeof (history_t), sizeof (neworder_t), sizeof (order_t), sizeof (order_wdc_t),
-        sizeof (orderline_t), sizeof (item_t), sizeof (stock_t));
-    INFO ("Loading the warehouse .. \n");
+    warehouseCount = FLAGS_tpcc_warehouse_count;
 
+    std::cout << "RocksDB TPCC workload" << std::endl;
     loadItem ();
     loadWarehouse ();
     for (u32 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
@@ -116,18 +101,6 @@ int main (int argc, char** argv) {
         thread.join ();
     }
     threads.clear ();
-    xystore->memoryUsage ();
-    
-    // Get current time
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
-
-    // Convert to local time
-    std::tm* local_time = std::localtime(&now_c);
-
-    // Output formatted date and time
-    std::cout << std::put_time(local_time, "%m/%d/%y %H:%M:%S") << std::endl;
-
     // -------------------------------------------------------------------------------------
     atomic<u64> running_threads_counter (0);
     atomic<u64> keep_running (true);
@@ -156,11 +129,8 @@ int main (int argc, char** argv) {
                     } else {
                         w_id = urand (1, FLAGS_tpcc_warehouse_count);
                     }
-                    // stop the TXs
-                    if (xystore->keep_running) {
-                        tx (w_id);
-                        thread_committed[t_i]++;
-                    }
+                    tx (w_id);
+                    thread_committed[t_i]++;
                 }
                 jumpmuCatch () { thread_aborted[t_i]++; }
             }
@@ -196,6 +166,5 @@ int main (int argc, char** argv) {
     for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
         cout << thread_counter[t_i] << ",";
     }
-    xystore->memoryUsage ();
     return 0;
 }

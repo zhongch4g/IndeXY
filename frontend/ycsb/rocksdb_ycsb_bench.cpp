@@ -29,6 +29,7 @@
 #include "slice.h"
 #include "test_util.h"
 #include "trace.h"
+#include <vector>
 
 using namespace leanstore;
 
@@ -40,6 +41,10 @@ using namespace util;
 using KeyTrace = RandomKeyTrace<util::TraceUniform>;
 using YCSBKey = u64;
 using YCSBPayload = BytesPayload<8>;
+
+using ROCKSDB_NAMESPACE::ColumnFamilyDescriptor;
+using ROCKSDB_NAMESPACE::ColumnFamilyHandle;
+using ROCKSDB_NAMESPACE::ColumnFamilyOptions;
 
 DEFINE_uint32 (batch, 100, "report batch");
 DEFINE_uint32 (readtime, 0, "if 0, then we read all keys");
@@ -54,6 +59,11 @@ DEFINE_string (benchmarks, "load,readall", "");
 DEFINE_string (tracefile, "randomtrace.data", "");
 DEFINE_double (percentile, 90, "percentile of exponential distribution for read");
 DEFINE_bool (is_seq, false, "enable the sequential trace");
+DEFINE_bool (prepare_trace, true, "prepare the trace by default");
+DEFINE_bool (is_readonly, false, "read rocksdb database");
+
+DEFINE_bool (is_sparse_hot_spot, true, "is_sparse_hot_spot");
+DEFINE_uint64 (segment_length, 1, "the length of the segment");
 
 namespace {
 
@@ -380,6 +390,8 @@ public:
     rocksdb::BlockBasedTableOptions tableOptions;
     int currRealMem = 0, peakRealMem = 0, currVirtMem = 0, peakVirtMem = 0;
 
+    uint64_t columnFamilyNums_;
+    std::vector<rocksdb::ColumnFamilyHandle*> handles;
     Benchmark ()
         : num_ (FLAGS_num),
           value_size_ (FLAGS_value_size),
@@ -392,13 +404,15 @@ public:
         // Enable the bloomfilter
         tableOptions.whole_key_filtering = true;
         tableOptions.filter_policy.reset (rocksdb::NewBloomFilterPolicy (10, false));
-        tableOptions.block_cache = rocksdb::NewLRUCache (512 * 1024 * 1024LL);
+        // tableOptions.block_cache = rocksdb::NewLRUCache (5 * 1024 * 1024 * 1024LL);
+        options.row_cache = rocksdb::NewLRUCache(5 * 1024 * 1024 * 1024LL);
         // tableOptions.cache_index_and_filter_blocks = true;
         // tableOptions.pin_l0_filter_and_index_blocks_in_cache = true;
 
         // Optimize RocksDB. This is the easiest way to get RocksDB to perform well
         options.IncreaseParallelism (4);
-        options.OptimizeLevelStyleCompaction ();
+        options.OptimizeUniversalStyleCompaction();
+        // options.manual_wal_flush = true;
         // ====================== FLATTEN the throughput ========================
         // Set up the rate limiter to allow a maximum of 1 MB/s write rate
         // The first parameter is the write rate limit in bytes per second
@@ -411,25 +425,59 @@ public:
         options.create_if_missing = true;
         options.max_open_files = -1;
         options.compression = rocksdb::kNoCompression;
-        options.compaction_style = rocksdb::kCompactionStyleUniversal;
+        // options.compaction_style = rocksdb::kCompactionStyleUniversal;
         options.write_buffer_size = 256 * 1024 * 1024;
         // options.arena_block_size = 64 * 1024;
         // options.disable_auto_compactions = true;
         options.table_factory.reset (rocksdb::NewBlockBasedTableFactory (tableOptions));
 
-        // create the database
+        if (!FLAGS_is_readonly) {
+            rocksdb::Status s = rocksdb::DB::Open (options, FLAGS_ssd_path, &db);
+            // create the database
+            rocksdb::ColumnFamilyOptions cf_options;
+            cf_options = options;
+            columnFamilyNums_ = FLAGS_worker_threads;
+            handles.resize (columnFamilyNums_);
+            for (auto i = 0; i < handles.size (); i++) {
+                auto c = db->CreateColumnFamily (cf_options, std::to_string (i), &(handles[i]));
+                if (!c.ok ()) {
+                    std::cout << "Creating column family failed -> " << i << std::endl;
+                } else {
+                    std::cout << "Creating column family successed -> " << i << std::endl;
+                }
+                assert (c.ok ());
+            }
+        } else {
+            std::cout << "Read only mode" << std::endl;
+            // Open the database with column families
+            rocksdb::Status status = rocksdb::DB::Open(options, FLAGS_ssd_path, &db);
 
-        rocksdb::Status s = rocksdb::DB::Open (options, FLAGS_ssd_path, &db);
+            if (status.ok()) {
+                // Database reopened successfully with column families, you can use db_reopened and column_families to access it
+            } else {
+                // Handle error opening the database
+                std::cerr << "Error reopening the database: " << status.ToString() << std::endl;
+            }
+
+        }
+
+        // rocksdb::Status s = rocksdb::DB::Open (options, FLAGS_ssd_path, &db);
     }
     ~Benchmark () { delete key_trace_; }
     void Run () {
-        trace_size_ = FLAGS_num;
-        key_trace_ = new KeyTrace (trace_size_, FLAGS_is_seq);
-        num_ = key_trace_->keys_.size ();
-        FLAGS_num = key_trace_->keys_.size ();
-        trace_size_ = key_trace_->keys_.size ();
-        if (reads_ == 0) {
-            reads_ = key_trace_->keys_.size ();
+        if (FLAGS_prepare_trace) {
+            trace_size_ = FLAGS_num;
+            key_trace_ = new KeyTrace (trace_size_, FLAGS_is_seq);
+            num_ = key_trace_->keys_.size ();
+            FLAGS_num = key_trace_->keys_.size ();
+            trace_size_ = key_trace_->keys_.size ();
+            if (reads_ == 0) {
+                reads_ = key_trace_->keys_.size ();
+            }
+        } else {
+            trace_size_ = FLAGS_num;
+            num_ = FLAGS_num;
+            key_trace_ = new KeyTrace (trace_size_, FLAGS_is_seq, FLAGS_prepare_trace);
         }
         PrintHeader ();
         // run benchmark
@@ -447,9 +495,16 @@ public:
                 name = std::string (benchmarks, sep - benchmarks);
                 benchmarks = sep + 1;
             }
+            if (name == "randomizeworkload") {
+                key_trace_->Randomize ();
+            }
+
             if (name == "load") {
-                // key_trace_->Randomize ();
                 method = &Benchmark::DoWrite;
+            } else if (name == "load_batch") {
+                method = &Benchmark::DoWriteBatch;
+            } else if (name == "readcustomize") {
+                method = &Benchmark::DoCustomizeRead;
             } else if (name == "readall") {
                 method = &Benchmark::DoReadAll;
             } else if (name == "readtrace") {
@@ -458,6 +513,23 @@ public:
             } else if (name == "savetrace") {
                 thread = 1;
                 method = &Benchmark::DoSaveTrace;
+            } else if (name == "createtracewithinterval") {
+                thread = 1;
+                method = &Benchmark::DoCreateTraceWithInterval;
+            } else if (name == "createtracewithzipfian") {
+                thread = 1;
+                method = &Benchmark::DoCreateTraceWithZipfian;
+            } else if (name == "createworkloadshiftingtrace") {
+                thread = 1;
+                method = &Benchmark::DoCreateWorkloadShiftingTrace;
+            } else if (name == "readworkload1") {
+                method = &Benchmark::DoReadWorkload1;
+            } else if (name == "readworkload2") {
+                method = &Benchmark::DoReadWorkload2;
+            } else if (name == "readworkload3") {
+                method = &Benchmark::DoReadWorkload3;
+            } else if (name == "readworkload4") {
+                method = &Benchmark::DoReadWorkload4;
             }
 
             if (method != nullptr) RunBenchmark (thread, name, method, print_hist);
@@ -484,13 +556,95 @@ public:
                 TransformKey (key, k);
 
                 std::string rValue;
-                rValue.resize (8);
+                rValue.resize (value_size_);
                 std::memcpy (rValue.data (), &key, 8);
                 db->Put (woptions, rocksdb::Slice ((char*)k.getData (), k.getKeyLen ()), rValue);
+                // db->Put(woptions, (ColumnFamilyHandle*)handles[thread->tid], rocksdb::Slice ((char*)k.getData (), k.getKeyLen ()), rValue);
+
+
             }
             auto ret = thread->stats.FinishedBatchOp (j);
         }
     }
+
+    void DoWriteBatch (ThreadState* thread) {
+        uint64_t batch = FLAGS_batch;
+        if (key_trace_ == nullptr) {
+            ERROR ("DoWrite lack key_trace_ initialization.");
+            return;
+        }
+
+        rocksdb::WriteBatch wb;
+        rocksdb::WriteOptions writeDisableWAL;
+        writeDisableWAL.disableWAL = true;
+
+        size_t interval = num_ / FLAGS_worker_threads;
+        size_t start_offset = thread->tid * interval;
+        auto key_iterator = key_trace_->iterate_between (start_offset, start_offset + interval);
+
+        thread->stats.Start ();
+
+        while (key_iterator.Valid ()) {
+            uint64_t j = 0;
+            for (; j < batch && key_iterator.Valid (); j++) {
+                auto& key = key_iterator.Next ();
+                Key k;
+                TransformKey (key, k);
+                std::string rValue;
+                rValue.resize (value_size_);
+                std::memcpy (rValue.data (), &key, 8);
+
+                if (wb.Count() == 3) {
+                    db->Write(writeDisableWAL, &wb);
+                    wb.Clear();
+                }
+                wb.Put((ColumnFamilyHandle*)handles[thread->tid], rocksdb::Slice ((char*)k.getData (), k.getKeyLen ()), rValue);
+                // db->Put (woptions, rocksdb::Slice ((char*)k.getData (), k.getKeyLen ()), rValue);
+                
+            }
+            auto ret = thread->stats.FinishedBatchOp (j);
+        }
+    }
+
+    void DoCustomizeRead (ThreadState* thread) {
+        uint64_t batch = FLAGS_batch;
+        if (key_trace_ == nullptr) {
+            perror ("DoReadAll lack key_trace_ initialization.");
+            return;
+        }
+        size_t interval = reads_ / FLAGS_worker_threads;
+        size_t start_offset = thread->tid * interval;
+        auto key_iterator =
+            key_trace_->read_iterate_between (start_offset, start_offset + interval);
+
+        roptions.verify_checksums = false;
+
+        size_t not_find = 0;
+        Duration duration (FLAGS_readtime, reads_);
+        rocksdb::Status s;
+        thread->stats.Start ();
+        while (!duration.Done (batch) && key_iterator.Valid ()) {
+            uint64_t j = 0, disk_access = 0;
+            for (; j < batch && key_iterator.Valid (); j++) {
+                size_t ikey = key_iterator.Next ();
+                Key k;
+                TransformKey (ikey, k);
+
+                std::string value;
+                s = db->Get(roptions, rocksdb::Slice ((char*)k.getData (), k.getKeyLen ()), &value);
+                if (!s.ok()) {
+                    not_find++;
+                }
+            }
+            thread->stats.FinishedBatchOp (j);
+        }
+        char buf[100];
+        snprintf (buf, sizeof (buf), "(num: %lu, not find: %lu)", interval, not_find);
+        if (not_find)
+            printf ("thread %2d num: %lu, not find: %lu\n", thread->tid, interval, not_find);
+        thread->stats.AddMessage (buf);
+    }
+
 
     void DoReadAll (ThreadState* thread) {
         uint64_t batch = FLAGS_batch;
@@ -537,10 +691,7 @@ public:
 
     void DoReadTrace (ThreadState* thread) {
         auto starttime = std::chrono::system_clock::now ();
-        uint64_t sample_length = 1;
-        uint64_t working_set_length = reads_;
         key_trace_->FromFile (FLAGS_tracefile);
-        key_trace_->Randomize ();
         num_ = key_trace_->keys_.size ();
         FLAGS_num = key_trace_->keys_.size ();
         trace_size_ = key_trace_->keys_.size ();
@@ -549,6 +700,205 @@ public:
         }
         auto duration = std::chrono::duration_cast<std::chrono::microseconds> (
             std::chrono::system_clock::now () - starttime);
+    }
+
+    void DoCreateTraceWithInterval (ThreadState* thread) {
+        auto starttime = std::chrono::system_clock::now ();
+        uint64_t sample_length = 90;
+        uint64_t working_set_length = reads_;
+        key_trace_->CreateReadWorkloadWithInterval (working_set_length, sample_length,
+                                                    FLAGS_percentile);
+        num_ = key_trace_->keys_.size ();
+        FLAGS_num = key_trace_->keys_.size ();
+        trace_size_ = key_trace_->keys_.size ();
+        if (reads_ == 0) {
+            reads_ = key_trace_->read_keys_.size ();
+        }
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds> (
+            std::chrono::system_clock::now () - starttime);
+    }
+
+    void DoCreateTraceWithZipfian (ThreadState* thread) {
+        auto starttime = std::chrono::system_clock::now ();
+        uint64_t read_dataset_length = reads_;
+        key_trace_->CreateReadWorkloadWithZipfianDistribution (read_dataset_length,
+                                                               FLAGS_percentile);
+        num_ = key_trace_->keys_.size ();
+        FLAGS_num = key_trace_->keys_.size ();
+        trace_size_ = key_trace_->keys_.size ();
+        if (reads_ == 0) {
+            reads_ = key_trace_->read_keys_.size ();
+        }
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds> (
+            std::chrono::system_clock::now () - starttime);
+    }
+
+    void DoCreateWorkloadShiftingTrace (ThreadState* thread) {
+        auto starttime = std::chrono::system_clock::now ();
+        uint64_t segment_length = FLAGS_segment_length;
+        uint64_t working_set_length = reads_;
+        key_trace_->CreateReadWorkloadWithLocalSequential4Workloads (
+            working_set_length, segment_length, FLAGS_percentile);
+        num_ = key_trace_->keys_.size ();
+        FLAGS_num = key_trace_->keys_.size ();
+        trace_size_ = key_trace_->keys_.size ();
+        if (reads_ == 0) {
+            reads_ = key_trace_->read_keys_.size ();
+        }
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds> (
+            std::chrono::system_clock::now () - starttime);
+    }
+
+    void DoReadWorkload1 (ThreadState* thread) {
+        uint64_t batch = FLAGS_batch;
+        if (key_trace_ == nullptr) {
+            ERROR ("DoReadWorkload1 lack key_trace_ initialization.");
+            return;
+        }
+        reads_ = key_trace_->read_keys_distribution_v1.size ();
+
+        size_t interval = reads_ / FLAGS_worker_threads;
+        size_t start_offset = thread->tid * interval;
+        auto key_iterator =
+            key_trace_->read_iterate_between_workload_1 (start_offset, start_offset + interval);
+
+        size_t not_find = 0;
+        Duration duration (FLAGS_readtime, reads_);
+        thread->stats.Start ();
+        while (!duration.Done (batch) && key_iterator.Valid ()) {
+            uint64_t j = 0;
+            for (; j < batch && key_iterator.Valid (); j++) {
+                auto& key = key_iterator.Next ();
+                Key k;
+                TransformKey (key, k);
+
+                std::string rValue;
+                auto isok = db->Get (roptions, rocksdb::Slice ((char*)k.getData (), k.getKeyLen ()),
+                                     &rValue);
+                if (!isok.ok ()) {
+                    not_find++;
+                }
+            }
+            thread->stats.FinishedBatchOp (j);
+        }
+        char buf[100];
+        snprintf (buf, sizeof (buf), "(num: %lu, not find: %lu)", interval, not_find);
+        if (not_find)
+            INFO ("thread %2d num: %lu, not find: %lu\n", thread->tid, interval, not_find);
+    }
+
+    void DoReadWorkload2 (ThreadState* thread) {
+        uint64_t batch = FLAGS_batch;
+        if (key_trace_ == nullptr) {
+            ERROR ("DoReadWorkload1 lack key_trace_ initialization.");
+            return;
+        }
+        reads_ = key_trace_->read_keys_distribution_v2.size ();
+
+        size_t interval = reads_ / FLAGS_worker_threads;
+        size_t start_offset = thread->tid * interval;
+        auto key_iterator =
+            key_trace_->read_iterate_between_workload_2 (start_offset, start_offset + interval);
+
+        size_t not_find = 0;
+        Duration duration (FLAGS_readtime, reads_);
+        thread->stats.Start ();
+        while (!duration.Done (batch) && key_iterator.Valid ()) {
+            uint64_t j = 0;
+            for (; j < batch && key_iterator.Valid (); j++) {
+                auto& key = key_iterator.Next ();
+                Key k;
+                TransformKey (key, k);
+
+                std::string rValue;
+                auto isok = db->Get (roptions, rocksdb::Slice ((char*)k.getData (), k.getKeyLen ()),
+                                     &rValue);
+                if (!isok.ok ()) {
+                    not_find++;
+                }
+            }
+            thread->stats.FinishedBatchOp (j);
+        }
+        char buf[100];
+        snprintf (buf, sizeof (buf), "(num: %lu, not find: %lu)", interval, not_find);
+        if (not_find)
+            INFO ("thread %2d num: %lu, not find: %lu\n", thread->tid, interval, not_find);
+    }
+
+    void DoReadWorkload3 (ThreadState* thread) {
+        uint64_t batch = FLAGS_batch;
+        if (key_trace_ == nullptr) {
+            ERROR ("DoReadWorkload1 lack key_trace_ initialization.");
+            return;
+        }
+        reads_ = key_trace_->read_keys_distribution_v3.size ();
+
+        size_t interval = reads_ / FLAGS_worker_threads;
+        size_t start_offset = thread->tid * interval;
+        auto key_iterator =
+            key_trace_->read_iterate_between_workload_3 (start_offset, start_offset + interval);
+
+        size_t not_find = 0;
+        Duration duration (FLAGS_readtime, reads_);
+        thread->stats.Start ();
+        while (!duration.Done (batch) && key_iterator.Valid ()) {
+            uint64_t j = 0;
+            for (; j < batch && key_iterator.Valid (); j++) {
+                auto& key = key_iterator.Next ();
+                Key k;
+                TransformKey (key, k);
+
+                std::string rValue;
+                auto isok = db->Get (roptions, rocksdb::Slice ((char*)k.getData (), k.getKeyLen ()),
+                                     &rValue);
+                if (!isok.ok ()) {
+                    not_find++;
+                }
+            }
+            thread->stats.FinishedBatchOp (j);
+        }
+        char buf[100];
+        snprintf (buf, sizeof (buf), "(num: %lu, not find: %lu)", interval, not_find);
+        if (not_find)
+            INFO ("thread %2d num: %lu, not find: %lu\n", thread->tid, interval, not_find);
+    }
+
+    void DoReadWorkload4 (ThreadState* thread) {
+        uint64_t batch = FLAGS_batch;
+        if (key_trace_ == nullptr) {
+            ERROR ("DoReadWorkload1 lack key_trace_ initialization.");
+            return;
+        }
+        reads_ = key_trace_->read_keys_distribution_v4.size ();
+
+        size_t interval = reads_ / FLAGS_worker_threads;
+        size_t start_offset = thread->tid * interval;
+        auto key_iterator =
+            key_trace_->read_iterate_between_workload_4 (start_offset, start_offset + interval);
+
+        size_t not_find = 0;
+        Duration duration (FLAGS_readtime, reads_);
+        thread->stats.Start ();
+        while (!duration.Done (batch) && key_iterator.Valid ()) {
+            uint64_t j = 0;
+            for (; j < batch && key_iterator.Valid (); j++) {
+                auto& key = key_iterator.Next ();
+                Key k;
+                TransformKey (key, k);
+
+                std::string rValue;
+                auto isok = db->Get (roptions, rocksdb::Slice ((char*)k.getData (), k.getKeyLen ()),
+                                     &rValue);
+                if (!isok.ok ()) {
+                    not_find++;
+                }
+            }
+            thread->stats.FinishedBatchOp (j);
+        }
+        char buf[100];
+        snprintf (buf, sizeof (buf), "(num: %lu, not find: %lu)", interval, not_find);
+        if (not_find)
+            INFO ("thread %2d num: %lu, not find: %lu\n", thread->tid, interval, not_find);
     }
 
 private:

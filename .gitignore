@@ -1,6 +1,6 @@
 .idea/
 .vscode/
-*.log
-*.data
+# *.log
+# *.data
 *.png
 *.csv

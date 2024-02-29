@@ -12,7 +12,7 @@ collect_pstat_stats() {
 }
 
 collect_iostat_stats() {
-    iostat -yxmt 1 >../stat/ycsb_artlsm_random_480m_1th_2GB_iostat.log &
+    iostat -yxmt 1 /dev/nvme2n1 > ../results/tpcc/data/tpcc_IndeX_leanstore_30GB_2_thrd_iostat.log &
     PIDPSTATSTAT2=$!
 }
 
@@ -47,7 +47,7 @@ tpcc_ExdIndex() {
 }
 
 tpcc_ExdIndex2() {
-    for i in 2 4 8 16; do
+    for i in 2; do
         rm ssd_file
         touch ssd_file
         rm *.csv
@@ -71,9 +71,9 @@ tpcc_ExdIndex2() {
             --contention_split \
             --xmerge \
             --print_tx_console \
-            --run_for_seconds=600 >../results/tpcc/data/tpcc_IndeX_${underlying_storage}_30GB_${i}_thrd_4KB_page_2TX.data
+            --run_for_seconds=600 >../results/tpcc/data/tpcc_IndeX_${underlying_storage}_30GB_${i}_thrd_4KB_page_2TX_iotest.data
 
-        mv log.log ../results/tpcc/data/tpcc_IndeX_${underlying_storage}_30GB_${i}_thrd_4KB_page_2TX.log
+        mv log.log ../results/tpcc/data/tpcc_IndeX_${underlying_storage}_30GB_${i}_thrd_4KB_page_2TX_iotest.log
     done
 }
 
@@ -105,4 +105,15 @@ else
     echo "Invalid engine"
 fi
 
+
+collect_iostat_stats
 tpcc_ExdIndex2
+
+kill stats
+set +e
+# kill $PIDPSTATSTAT1
+kill $PIDPSTATSTAT2
+set -e
+sudo kill -9 $(pidof iostat)
+# sudo kill -9 $(pidof dstat)
+# sleep 30

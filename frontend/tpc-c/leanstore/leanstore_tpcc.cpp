@@ -124,6 +124,17 @@ int main (int argc, char** argv) {
     auto random = std::make_unique<leanstore::utils::ZipfGenerator> (FLAGS_tpcc_warehouse_count,
                                                                      FLAGS_zipf_factor);
     db.startProfilingThread ();
+
+     // Get current time
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+
+    // Convert to local time
+    std::tm* local_time = std::localtime(&now_c);
+
+    // Output formatted date and time
+    std::cout << std::put_time(local_time, "%m/%d/%y %H:%M:%S") << std::endl;
+
     u64 tx_per_thread[FLAGS_worker_threads];
     for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
         crm.scheduleJobAsync (t_i, [&, t_i] () {

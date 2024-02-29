@@ -52,6 +52,11 @@ target_compile_definitions(xystore_tpcc PUBLIC LEANSTORE=${LEANSTORE} ROCKSDB=${
 add_executable(ori_artree_tpcc tpc-c/ori_artree/ori_artree_tpcc.cpp)
 target_link_libraries(ori_artree_tpcc leanstore ${JemallocLibs} Threads::Threads)
 
+# rocksdb tpcc benchmark
+add_executable(rocksdb_tpcc tpc-c/rocksdb/rocksdb_tpcc.cpp)
+target_link_libraries(rocksdb_tpcc leanstore Threads::Threads)
+target_include_directories(rocksdb_tpcc PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+
 # https://source.wiredtiger.com/10.0.0/build-posix.html
 # add_executable(wiredtiger_tpcc tpc-c/wiredtiger/wiredtiger_tpcc.cpp)
 # target_link_libraries(wiredtiger_tpcc leanstore wiredtiger Threads::Threads dl z libbz2.a lz4 snappy)
